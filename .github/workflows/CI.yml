@@ -1,0 +1,382 @@
+name: Bootcamp CI - Test Runner
+
+# Students: edit only BOOTCAMP_PART below (B1, B2, or later B3).
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+env:
+  # Students: set to B1, B2, or B3 for the milestone you are working on
+  BOOTCAMP_PART: B3
+
+jobs:
+  always-on:
+    name: Always-on checks
+    runs-on:
+      group: runners_v1
+
+    env:
+      app_name: BootcampDebug
+
+    defaults:
+      run:
+        working-directory: ./${{ env.base_folder }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: |
+            21
+            17
+
+      - name: Retrieve gradle cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+
+      - name: Decode secrets
+        env:
+          GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES }}
+          LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES" ]; then
+            echo "$GOOGLE_SERVICES" | base64 --decode > ./app/google-services.json
+          else
+            echo "::warning::GOOGLE_SERVICES secret is not set. google-services.json will not be created. Should be present after B2"
+          fi
+
+          if [ -n "$LOCAL_PROPERTIES" ]; then
+            echo "$LOCAL_PROPERTIES" | base64 --decode > ./local.properties
+          else
+            echo "::warning::LOCAL_PROPERTIES secret is not set. local.properties will not be created. Should be present after B3"
+          fi
+
+      - name: Grant execute permission for gradlew
+        run: |
+          chmod +x ./gradlew
+
+      - name: KTFmt Check
+        run: |
+          ./gradlew ktfmtCheck
+
+      - name: Assemble
+        run: |
+          ./gradlew assembleDebug lint --parallel --build-cache
+
+  user-stories:
+    name: User stories
+    runs-on: self-hosted
+
+    defaults:
+      run:
+        working-directory: ./${{ env.base_folder }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Check that userStories.txt exists
+        run: stat userStories.txt
+
+      - name: Check that userStories.txt has two lines
+        run: '[ $(grep -cve "^\s*$" userStories.txt) -eq "2" ]'
+
+  time-recording:
+    name: Time tracking files
+    runs-on: self-hosted
+
+    defaults:
+      run:
+        working-directory: ./${{ env.base_folder }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Check that the time tracking files exist
+        run: |
+          stat actualTimeB1.csv
+          stat actualTimeB2.csv
+          stat actualTimeB3.csv
+
+      - name: Check that the time tracking files have been filled
+        run: |
+          python3 <<'EOF'
+          import csv, sys
+
+          files = ['actualTimeB1.csv', 'actualTimeB2.csv', 'actualTimeB3.csv']
+          failed = False
+          recorded = []
+
+          for path in files:
+            values, invalid = [], False
+            with open(path, newline='') as f:
+              for row in csv.DictReader(f):
+                value = row['Actual time (minutes)'].strip()
+                if value.isdigit():
+                  values.append(int(value))
+                else:
+                  print(f"{path}: Error: Value '{value}' in 'Actual time (minutes)' is not an integer.")
+                  invalid = failed = True
+            recorded.append((values, invalid))
+
+          started = [i for i, (values, _) in enumerate(recorded) if any(values)]
+          reached = max(started) + 1 if started else 0
+
+          for i, path in enumerate(files):
+            values, invalid = recorded[i]
+            if invalid:
+              continue
+            elif i >= reached:
+              print(f"{path}: not started yet, skipping.")
+            elif all(values):
+              print(f"{path}: OK.")
+            else:
+              print(f"{path}: Error: At least one value in 'Actual time (minutes)' is zero.")
+              failed = True
+
+          sys.exit(1 if failed else 0)
+          EOF
+
+  mcq-check:
+    name: PR Review MCQ Check
+    runs-on: self-hosted
+
+    defaults:
+      run:
+        working-directory: ./${{ env.base_folder }}
+
+    steps:
+      - name: Checkout
+        if: ${{ env.BOOTCAMP_PART == 'B3' }}
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Skip MCQ check (not B3)
+        if: ${{ env.BOOTCAMP_PART != 'B3' }}
+        run: echo "Skipping PR Review MCQ check (BOOTCAMP_PART=${{ env.BOOTCAMP_PART }})"
+
+      - name: Check MCQ formatting
+        if: ${{ env.BOOTCAMP_PART == 'B3' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Checking PR Review MCQ formatting..."
+
+          if [[ ! -f "prReviewMCQ.md" ]]; then
+            echo "❌ prReviewMCQ.md file not found!"
+            exit 1
+          fi
+
+          total_questions=$(grep -Ec '^\*\*Q[0-9]+:' prReviewMCQ.md || true)
+          if [[ "$total_questions" -eq 0 ]]; then
+            echo "❌ No questions found (expected lines like '**Q1:' at column 0)."
+            exit 1
+          fi
+          echo "Found $total_questions questions"
+
+          answered_questions=$(awk '
+            /^\*\*Q[0-9]+:/ { if (seen) total += x; seen=1; x=0 }
+            seen && /\[X\]/ { x++ }
+            END { if (seen) total += x; print total+0 }
+          ' prReviewMCQ.md)
+          echo "Found $answered_questions answered marks inside question blocks"
+
+          if [[ "$answered_questions" -ne "$total_questions" ]]; then
+            echo "❌ Not all questions are answered exactly once (by total count)."
+            echo "Expected: $total_questions"
+            echo "Found:    $answered_questions"
+            total_mismatch=1
+          else
+            total_mismatch=0
+          fi
+
+          echo "Checking that each question has exactly one [X]…"
+
+          failed=0
+          while read -r question x_count; do
+            if [[ "$x_count" -ne 1 ]]; then
+              echo "❌ $question has $x_count [X] marks (should have exactly 1)"
+              failed=1
+            else
+              echo "✅ $question correctly answered"
+            fi
+          done < <(awk '
+            /^\*\*Q[0-9]+:/ {
+              if (qnum > 0) { print "Q" qnum, x }
+              qnum++
+              x=0
+              next
+            }
+            qnum > 0 && /\[X\]/ { x++ }
+            END {
+              if (qnum > 0) { print "Q" qnum, x }
+            }
+          ' prReviewMCQ.md)
+
+          if [[ "$failed" -ne 0 || "$total_mismatch" -ne 0 ]]; then
+            echo "❌ MCQ formatting check failed."
+            exit 1
+          fi
+
+          echo "✅ All $total_questions questions are properly answered with correct formatting!"
+
+  # Unlock watches this fixed job name. Part comes from BOOTCAMP_PART above.
+  # One emulator boot: public must pass; staff soft-fails in the same script.
+  part-public:
+    name: part-public
+    runs-on:
+      group: runners_v1
+
+    defaults:
+      run:
+        working-directory: ./${{ env.base_folder }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: |
+            21
+            17
+
+      - name: Retrieve gradle cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+
+      - name: Decode secrets
+        env:
+          GOOGLE_SERVICES: ${{ secrets.GOOGLE_SERVICES }}
+          LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES" ]; then
+            echo "$GOOGLE_SERVICES" | base64 --decode > ./app/google-services.json
+          else
+            echo "::warning::GOOGLE_SERVICES secret is not set. google-services.json will not be created. Should be present after B2"
+          fi
+
+          if [ -n "$LOCAL_PROPERTIES" ]; then
+            echo "$LOCAL_PROPERTIES" | base64 --decode > ./local.properties
+          else
+            echo "::warning::LOCAL_PROPERTIES secret is not set. local.properties will not be created. Should be present after B3"
+          fi
+
+      - name: Grant execute permission for gradlew
+        run: |
+          chmod +x ./gradlew
+
+      - name: Setup NodeJS
+        if: ${{ env.BOOTCAMP_PART != 'B1' }}
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install Firebase CLI
+        if: ${{ env.BOOTCAMP_PART != 'B1' }}
+        run: npm install -g firebase-tools
+
+      - name: Firestore Check
+        if: ${{ env.BOOTCAMP_PART != 'B1' }}
+        run: |
+          if [ ! -e "firebase.json" ]; then
+            echo "(Warning): 'firebase.json' file is missing. Use 'firebase emulators:init'. Emulators are setup in B2."
+            exit 0
+          fi
+          jq -e '.emulators' firebase.json >/dev/null || {
+            echo "'firebase.json' is missing 'emulators'. Run 'firebase emulators:init'."
+            exit 1
+          }
+          for e in auth firestore; do
+            jq -e ".emulators.$e" firebase.json >/dev/null || {
+              echo "'firebase.json' is missing 'emulators.$e'. Run 'firebase emulators:init'."
+              exit 1
+            }
+          done
+
+      - name: Firestore Security Rules tests
+        if: ${{ env.BOOTCAMP_PART == 'B3' }}
+        run: |
+          if [ ! -e "firebase.json" ]; then
+            echo "(B3 Warning): 'firebase.json' file is missing. Use 'firebase emulators:init'."
+            exit 0
+          fi
+          if [ -e "firebase/firestore/firestore.rules" ]; then
+            jq -e '.firestore.rules' firebase.json >/dev/null || {
+              echo "'firebase.json' is missing 'firestore.rules'."
+              exit 1
+            }
+            export JAVA_HOME="$JAVA_HOME_21_X64"
+            export PATH="$JAVA_HOME/bin:$PATH"
+            (cd firebase/firestore/test 2>/dev/null && npm install && npm test) || exit $?
+          else
+            echo "(B3 Warning): Firestore rules file not found in firebase/firestore."
+          fi
+
+      - name: Start Firebase emulators
+        if: ${{ env.BOOTCAMP_PART != 'B1' }}
+        run: |
+          if [ -e "firebase.json" ] && jq -e '.emulators' firebase.json >/dev/null; then
+            echo "Starting Firebase emulators for instrumentation tests..."
+            export JAVA_HOME="$JAVA_HOME_21_X64"
+            export PATH="$JAVA_HOME/bin:$PATH"
+            firebase emulators:start --only auth,firestore --project demo-project &
+            echo "Firebase emulators started"
+          else
+            echo "Firebase emulators not configured, skipping emulator startup..."
+          fi
+
+      - name: Run public unit tests
+        run: |
+          ./gradlew testDebugUnitTest "-${BOOTCAMP_PART}" -public --parallel --build-cache
+
+      - name: Run public then staff instrumentation tests
+        timeout-minutes: 40
+        uses: RandyLutcavich/android-emulator-runner-without-sdk-setup@v1.0.3
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          avd-name: github
+          force-avd-creation: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -skin 1080x2400
+          disable-animations: true
+          # Emulator-runner runs each script line as its own `sh -c`.
+          script: bash .github/scripts/run-part-instrumented.sh ${{ env.BOOTCAMP_PART }}
